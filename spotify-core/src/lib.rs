@@ -1,0 +1,772 @@
+use std::{
+    io,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex, Once,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use librespot::{
+    core::{
+        SpotifyId, SpotifyUri, authentication::Credentials, config::SessionConfig, session::Session,
+    },
+    metadata::{Lyrics, lyrics::SyncType},
+    playback::{
+        config::{PlayerConfig, VolumeCtrl},
+        mixer::{self, Mixer, MixerConfig},
+        player::{Player, PlayerEvent, PlayerEventChannel},
+    },
+};
+use serde::Serialize;
+use tokio::time::timeout;
+
+mod spectrum;
+mod offline;
+
+use offline::LOCAL_SAMPLE_RATE;
+use rodio::Source;
+use spectrum::{SharedSpectrum, SpectrumSink};
+
+static INITIALIZE_LOGGING: Once = Once::new();
+
+#[swift_bridge::bridge]
+mod ffi {
+    extern "Rust" {
+        type SpotifyCore;
+
+        #[swift_bridge(init)]
+        fn new() -> SpotifyCore;
+
+        async fn connect(&self, access_token: String, client_id: String) -> Result<(), String>;
+
+        async fn play_track(&self, spotify_uri: String) -> Result<(), String>;
+
+        fn load_track(&self, spotify_uri: String) -> Result<(), String>;
+
+        fn play(&self) -> Result<(), String>;
+        fn pause(&self) -> Result<(), String>;
+        fn seek(&self, position_ms: u32) -> Result<(), String>;
+        fn playback_position_ms(&self) -> u32;
+        fn playback_duration_ms(&self) -> u32;
+        fn take_end_of_track(&self) -> bool;
+        fn is_playing_local(&self) -> bool;
+
+        fn set_downloads_directory(&self, directory: String) -> Result<(), String>;
+        async fn download_track(&self, spotify_uri: String) -> Result<(), String>;
+        fn track_available_locally(&self, spotify_uri: String) -> bool;
+        fn downloaded_track_uris(&self) -> Vec<String>;
+        fn remove_download(&self, spotify_uri: String) -> bool;
+        async fn play_local_track(&self, spotify_uri: String) -> Result<(), String>;
+
+        fn set_volume(&self, volume: f32) -> Result<(), String>;
+        fn volume(&self) -> f32;
+        async fn lyrics_json(&self, spotify_uri: String) -> Result<String, String>;
+        fn spectrum_levels(&self) -> Vec<f32>;
+        fn core_version() -> String;
+    }
+}
+
+fn core_version() -> String {
+    env!("CARGO_PKG_VERSION").to_owned()
+}
+
+struct SpotifyState {
+    session: Option<Session>,
+    player: Option<Arc<Player>>,
+    mixer: Option<Arc<dyn Mixer>>,
+    downloads_dir: PathBuf,
+    local_playback: Option<offline::LocalPlayback>,
+    /// Offline playback output sink. The backing `OutputStream` is leaked so the
+    /// sink keeps a live device connection without breaking `Send` on the state.
+    local_sink: Option<Arc<rodio::Sink>>,
+}
+
+impl Default for SpotifyState {
+    fn default() -> Self {
+        Self {
+            session: None,
+            player: None,
+            mixer: None,
+            downloads_dir: default_downloads_directory(),
+            local_playback: None,
+            local_sink: None,
+        }
+    }
+}
+
+fn default_downloads_directory() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        let path = PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("Swiftify")
+            .join("Downloads");
+        if let Ok(_) = std::fs::create_dir_all(&path) {
+            return path;
+        }
+    }
+    PathBuf::from(".swiftify-downloads")
+}
+
+#[derive(Default)]
+struct PlaybackTimeline {
+    position_ms: u32,
+    duration_ms: u32,
+    is_playing: bool,
+    end_of_track: bool,
+    observed_at: Option<Instant>,
+}
+
+impl PlaybackTimeline {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn observe_position(&mut self, position_ms: u32, is_playing: Option<bool>) {
+        self.position_ms = position_ms;
+        if let Some(is_playing) = is_playing {
+            self.is_playing = is_playing;
+        }
+        self.observed_at = Some(Instant::now());
+    }
+
+    fn current_position_ms(&self) -> u32 {
+        let elapsed_ms = if self.is_playing {
+            self.observed_at
+                .map(|observed_at| observed_at.elapsed().as_millis() as u32)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let position_ms = self.position_ms.saturating_add(elapsed_ms);
+
+        if self.duration_ms == 0 {
+            position_ms
+        } else {
+            position_ms.min(self.duration_ms)
+        }
+    }
+}
+
+pub struct SpotifyCore {
+    state: Mutex<SpotifyState>,
+    spectrum: SharedSpectrum,
+    timeline: Arc<Mutex<PlaybackTimeline>>,
+}
+
+impl SpotifyCore {
+    pub fn new() -> Self {
+        INITIALIZE_LOGGING.call_once(|| {
+            let _ = env_logger::Builder::from_env(
+                env_logger::Env::default().default_filter_or("librespot=info"),
+            )
+            .try_init();
+        });
+
+        Self {
+            state: Mutex::new(SpotifyState::default()),
+            spectrum: SharedSpectrum::new(),
+            timeline: Arc::new(Mutex::new(PlaybackTimeline::default())),
+        }
+    }
+
+    pub async fn connect(&self, access_token: String, client_id: String) -> Result<(), String> {
+        if access_token.trim().is_empty() {
+            return Err("access token cannot be empty".to_owned());
+        }
+
+        let client_id = client_id.trim();
+        if client_id.is_empty() {
+            return Err("spotify client ID cannot be empty".to_owned());
+        }
+
+        let session_config = SessionConfig {
+            client_id: client_id.to_owned(),
+            ..SessionConfig::default()
+        };
+
+        let session = Session::new(session_config, None);
+        session
+            .connect(Credentials::with_access_token(access_token), false)
+            .await
+            .map_err(|error| format!("failed to connect to spotify: {error}"))?;
+
+        let mixer_builder =
+            mixer::find(None).ok_or_else(|| "no librespot volume mixer is available".to_owned())?;
+        let mixer = mixer_builder(MixerConfig::default())
+            .map_err(|error| format!("failed to create volume mixer: {error}"))?;
+        mixer.set_volume((0.75 * VolumeCtrl::MAX_VOLUME as f32) as u16);
+        let spectrum_volume = mixer.get_soft_volume();
+
+        let spectrum = self.spectrum.clone();
+        let mut player_config = PlayerConfig::default();
+        player_config.position_update_interval = Some(Duration::from_millis(200));
+        let player = Player::new(
+            player_config,
+            session.clone(),
+            mixer.get_soft_volume(),
+            move || Box::new(SpectrumSink::new(spectrum, spectrum_volume)),
+        );
+        let event_channel = player.get_player_event_channel();
+        let timeline = Arc::clone(&self.timeline);
+        tokio::spawn(monitor_player_events(event_channel, timeline));
+
+        let mut state = self.lock_state()?;
+        state.session = Some(session);
+        state.player = Some(player);
+        state.mixer = Some(mixer);
+
+        Ok(())
+    }
+
+    pub async fn play_track(&self, spotify_uri: String) -> Result<(), String> {
+        self.clear_local_playback();
+        let uri = Self::parse_playable_uri(&spotify_uri)?;
+        let player = self.player()?;
+        let mut events = player.get_player_event_channel();
+
+        self.spectrum.clear();
+        self.reset_timeline();
+        player.load(uri.clone(), true, 0);
+
+        loop {
+            let event = timeout(Duration::from_secs(30), events.recv())
+                .await
+                .map_err(|_| "timed out while loading the Spotify track".to_owned())?
+                .ok_or_else(|| "the librespot player stopped unexpectedly".to_owned())?;
+
+            match event {
+                PlayerEvent::Playing { track_id, .. } if track_id == uri => return Ok(()),
+                PlayerEvent::Unavailable { track_id, .. } if track_id == uri => {
+                    return Err(format!(
+                        "librespot could not load {spotify_uri}; the track itself may still be available"
+                    ));
+                }
+                PlayerEvent::Stopped { track_id, .. } if track_id == uri => {
+                    return Err("the Spotify track stopped before playback began".to_owned());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub fn load_track(&self, spotify_uri: String) -> Result<(), String> {
+        self.clear_local_playback();
+        let uri = Self::parse_playable_uri(&spotify_uri)?;
+
+        self.spectrum.clear();
+        self.reset_timeline();
+        self.player()?.load(uri, true, 0);
+        Ok(())
+    }
+
+    pub fn play(&self) -> Result<(), String> {
+        if self.local_active()? {
+            let sink = self.resolve_live_sink()?;
+            if let Ok(mut timeline) = self.timeline.lock() {
+                let position = timeline.position_ms;
+                timeline.observe_position(position, Some(true));
+            }
+            sink.play();
+            return Ok(());
+        }
+        self.player()?.play();
+        Ok(())
+    }
+
+    pub fn pause(&self) -> Result<(), String> {
+        if self.local_active()? {
+            let sink = self.resolve_live_sink()?;
+            if let Ok(mut timeline) = self.timeline.lock() {
+                let position = timeline.position_ms;
+                timeline.observe_position(position, Some(false));
+            }
+            sink.pause();
+            self.spectrum.clear();
+            return Ok(());
+        }
+        self.player()?.pause();
+        self.spectrum.clear();
+        Ok(())
+    }
+
+    pub fn seek(&self, position_ms: u32) -> Result<(), String> {
+        if self.local_active()? {
+            return self.local_seek(position_ms);
+        }
+        self.player()?.seek(position_ms);
+        if let Ok(mut timeline) = self.timeline.lock() {
+            timeline.observe_position(position_ms, None);
+        }
+        Ok(())
+    }
+
+    pub fn playback_position_ms(&self) -> u32 {
+        if let Ok(state) = self.lock_state() {
+            if let Some(local) = &state.local_playback {
+                let duration = local.duration_ms.min(u32::MAX as u64) as u32;
+                return local.position_ms().min(duration);
+            }
+        }
+        self.timeline
+            .lock()
+            .map(|timeline| timeline.current_position_ms())
+            .unwrap_or(0)
+    }
+
+    pub fn playback_duration_ms(&self) -> u32 {
+        if let Ok(state) = self.lock_state() {
+            if let Some(local) = &state.local_playback {
+                return local.duration_ms.min(u32::MAX as u64) as u32;
+            }
+        }
+        self.timeline
+            .lock()
+            .map(|timeline| timeline.duration_ms)
+            .unwrap_or(0)
+    }
+
+    pub fn take_end_of_track(&self) -> bool {
+        self.timeline
+            .lock()
+            .map(|mut timeline| std::mem::take(&mut timeline.end_of_track))
+            .unwrap_or(false)
+    }
+
+    pub fn is_playing_local(&self) -> bool {
+        self.lock_state()
+            .map(|state| state.local_playback.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn set_downloads_directory(&self, directory: String) -> Result<(), String> {
+        let path = PathBuf::from(directory);
+        std::fs::create_dir_all(&path)
+            .map_err(|error| format!("failed to create downloads directory: {error}"))?;
+        let mut state = self.lock_state()?;
+        state.downloads_dir = path;
+        Ok(())
+    }
+
+    pub async fn download_track(&self, spotify_uri: String) -> Result<(), String> {
+        let session = self.session()?;
+        let downloads_dir = {
+            let state = self.lock_state()?;
+            state.downloads_dir.clone()
+        };
+        offline::download_track(session, spotify_uri, downloads_dir).await
+    }
+
+    pub fn track_available_locally(&self, spotify_uri: String) -> bool {
+        let downloads_dir = self
+            .lock_state()
+            .map(|state| state.downloads_dir.clone())
+            .unwrap_or_default();
+        offline::is_available_locally(&downloads_dir, &spotify_uri)
+    }
+
+    pub fn downloaded_track_uris(&self) -> Vec<String> {
+        let downloads_dir = self
+            .lock_state()
+            .map(|state| state.downloads_dir.clone())
+            .unwrap_or_default();
+        offline::downloaded_track_uris(&downloads_dir)
+    }
+
+    pub fn remove_download(&self, spotify_uri: String) -> bool {
+        if self
+            .lock_state()
+            .map(|state| state.local_playback.is_some())
+            .unwrap_or(false)
+        {
+            self.clear_local_playback();
+        }
+        let downloads_dir = self
+            .lock_state()
+            .map(|state| state.downloads_dir.clone())
+            .unwrap_or_default();
+        offline::remove_download(&downloads_dir, &spotify_uri)
+    }
+
+    pub async fn play_local_track(&self, spotify_uri: String) -> Result<(), String> {
+        let path = self.resolve_local_path(&spotify_uri)?;
+        self.clear_local_playback();
+        if let Ok(player) = self.player() {
+            player.pause();
+        }
+
+        let file = std::fs::File::open(&path)
+            .map_err(|error| format!("failed to open local track: {error}"))?;
+        let decoder = rodio::Decoder::new_flac(io::BufReader::new(file))
+            .map_err(|error| format!("failed to decode local track: {error}"))?;
+        let duration_ms = decoder.total_duration().map(|d| d.as_millis() as u64).unwrap_or(0);
+        let channels = decoder.channels() as u32;
+
+        let pushed_frames = Arc::new(AtomicU64::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let source_frames = Arc::clone(&pushed_frames);
+        let spectrum = self.spectrum.clone();
+        let source = offline::LocalTrackSource::new(decoder, spectrum, source_frames);
+
+        let sink = self.resolve_live_sink()?;
+        sink.stop();
+        sink.clear();
+
+        // Position is derived from the COUNT of consumed samples; rodio consumes
+        // at real time while playing, so no explicit clock is required.
+        sink.append(source);
+        sink.play();
+
+        {
+            let mut state = self.lock_state()?;
+            state.local_playback = Some(offline::LocalPlayback {
+                path: path.clone(),
+                duration_ms,
+                pushed_frames,
+                channels,
+                cancel,
+            });
+        }
+        self.reset_timeline();
+        if let Ok(mut timeline) = self.timeline.lock() {
+            timeline.duration_ms = duration_ms.min(u32::MAX as u64) as u32;
+            timeline.observe_position(0, Some(true));
+        }
+
+        self.spawn_local_end_watcher();
+        Ok(())
+    }
+
+    pub fn set_volume(&self, volume: f32) -> Result<(), String> {
+        let mixer = self.mixer()?;
+        let volume = volume.clamp(0.0, 1.0);
+        mixer.set_volume((volume * VolumeCtrl::MAX_VOLUME as f32).round() as u16);
+        Ok(())
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.mixer()
+            .map(|mixer| mixer.volume() as f32 / VolumeCtrl::MAX_VOLUME as f32)
+            .unwrap_or(0.75)
+    }
+
+    pub async fn lyrics_json(&self, spotify_uri: String) -> Result<String, String> {
+        let uri = Self::parse_playable_uri(&spotify_uri)?;
+        let track_id = SpotifyId::try_from(&uri)
+            .map_err(|error| format!("invalid Spotify track for lyrics: {error}"))?;
+        let lyrics = Lyrics::get(&self.session()?, &track_id)
+            .await
+            .map_err(|error| format!("Spotify lyrics are unavailable: {error}"))?;
+        let payload = LyricsPayload::from(lyrics);
+
+        serde_json::to_string(&payload)
+            .map_err(|error| format!("failed to encode Spotify lyrics: {error}"))
+    }
+
+    pub fn spectrum_levels(&self) -> Vec<f32> {
+        self.spectrum.levels()
+    }
+
+    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, SpotifyState>, String> {
+        self.state
+            .lock()
+            .map_err(|_| "spotify player state is unavailable".to_owned())
+    }
+
+    fn player(&self) -> Result<Arc<Player>, String> {
+        let state = self.lock_state()?;
+
+        if state.session.is_none() {
+            return Err("not connected to spotify".to_owned());
+        }
+
+        state
+            .player
+            .clone()
+            .ok_or_else(|| "spotify player is not initialized".to_owned())
+    }
+
+    fn session(&self) -> Result<Session, String> {
+        self.lock_state()?
+            .session
+            .clone()
+            .ok_or_else(|| "not connected to spotify".to_owned())
+    }
+
+    fn mixer(&self) -> Result<Arc<dyn Mixer>, String> {
+        self.lock_state()?
+            .mixer
+            .clone()
+            .ok_or_else(|| "spotify volume mixer is not initialized".to_owned())
+    }
+
+    fn local_active(&self) -> Result<bool, String> {
+        Ok(self.lock_state()?.local_playback.is_some())
+    }
+
+    fn resolve_live_sink(&self) -> Result<Arc<rodio::Sink>, String> {
+        {
+            let state = self.lock_state()?;
+            if let Some(sink) = &state.local_sink {
+                return Ok(Arc::clone(sink));
+            }
+        }
+        let mut stream = rodio::OutputStreamBuilder::open_default_stream()
+            .map_err(|_| "no audio output device is available".to_owned())?;
+        stream.log_on_drop(false);
+        // Leak the stream so it stays connected for the lifetime of the app while
+        // keeping the shared state `Send` for the Swift bridge.
+        let leaked = Box::leak(Box::new(stream));
+        let sink = rodio::Sink::connect_new(leaked.mixer());
+        let sink: Arc<rodio::Sink> = Arc::new(sink);
+        let mut state = self.lock_state()?;
+        state.local_sink = Some(Arc::clone(&sink));
+        Ok(sink)
+    }
+
+    fn resolve_local_path(&self, spotify_uri: &str) -> Result<PathBuf, String> {
+        let downloads_dir = self.lock_state()?.downloads_dir.clone();
+        offline::local_track_path(&downloads_dir, spotify_uri)
+            .ok_or_else(|| format!("track is not available locally: {spotify_uri}"))
+    }
+
+    fn clear_local_playback(&self) {
+        if let Ok(sink) = self.resolve_live_sink() {
+            sink.stop();
+            sink.clear();
+        }
+        if let Ok(mut state) = self.lock_state() {
+            if let Some(local) = state.local_playback.take() {
+                local.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn local_seek(&self, position_ms: u32) -> Result<(), String> {
+        let playback = self
+            .lock_state()?
+            .local_playback
+            .clone()
+            .ok_or_else(|| "no local playback is active".to_owned())?;
+        let duration = playback.duration_ms;
+        let channels = playback.channels.max(1);
+        let target = (position_ms as u64).min(duration);
+
+        let sink = self.resolve_live_sink()?;
+        sink.clear();
+        playback.cancel.store(true, Ordering::Relaxed);
+        playback.pushed_frames.store(0, Ordering::Relaxed);
+
+        let path = playback.path.clone();
+
+        // Re-decode and fast-forward to the target position.
+        let file = std::fs::File::open(&path)
+            .map_err(|error| format!("failed to open local track: {error}"))?;
+        let mut decoder = rodio::Decoder::new_flac(io::BufReader::new(file))
+            .map_err(|error| format!("failed to decode local track: {error}"))?;
+
+        let target_samples = target * LOCAL_SAMPLE_RATE as u64 / 1_000 * channels as u64;
+        let mut skipped: u64 = 0;
+        while skipped < target_samples {
+            match decoder.next() {
+                Some(_) => skipped += 1,
+                None => break,
+            }
+        }
+
+        let pushed_frames = Arc::new(AtomicU64::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let spectrum = self.spectrum.clone();
+        let source_frames = Arc::clone(&pushed_frames);
+        let source = offline::LocalTrackSource::new(decoder, spectrum, source_frames);
+
+        sink.append(source);
+        sink.play();
+
+        let mut state = self.lock_state()?;
+        state.local_playback = Some(offline::LocalPlayback {
+            path,
+            duration_ms: duration,
+            pushed_frames,
+            channels,
+            cancel,
+        });
+        if let Ok(mut timeline) = self.timeline.lock() {
+            timeline.observe_position(target as u32, Some(true));
+        }
+        Ok(())
+    }
+
+    fn spawn_local_end_watcher(&self) {
+        let sink = match self.resolve_live_sink() {
+            Ok(sink) => sink,
+            Err(_) => return,
+        };
+        let timeline = Arc::clone(&self.timeline);
+        std::thread::Builder::new()
+            .name("swiftify-local-end".to_owned())
+            .spawn(move || {
+                while !sink.empty() {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                // A short grace period ensures any trailing source has been flushed.
+                std::thread::sleep(Duration::from_millis(100));
+                if let Ok(mut timeline) = timeline.lock() {
+                    timeline.end_of_track = true;
+                    timeline.is_playing = false;
+                    timeline.observed_at = Some(Instant::now());
+                }
+            })
+            .ok();
+    }
+
+    fn reset_timeline(&self) {
+        if let Ok(mut timeline) = self.timeline.lock() {
+            timeline.reset();
+        }
+    }
+
+    fn parse_playable_uri(spotify_uri: &str) -> Result<SpotifyUri, String> {
+        let uri = SpotifyUri::from_uri(spotify_uri)
+            .map_err(|error| format!("invalid spotify uri: {error}"))?;
+
+        if !uri.is_playable() {
+            return Err(format!(
+                "spotify uri is not directly playable: {spotify_uri}"
+            ));
+        }
+
+        Ok(uri)
+    }
+}
+
+async fn monitor_player_events(
+    mut events: PlayerEventChannel,
+    timeline: Arc<Mutex<PlaybackTimeline>>,
+) {
+    while let Some(event) = events.recv().await {
+        let Ok(mut timeline) = timeline.lock() else {
+            continue;
+        };
+
+        match event {
+            PlayerEvent::Loading { position_ms, .. } => {
+                timeline.observe_position(position_ms, Some(false));
+            }
+            PlayerEvent::Playing { position_ms, .. }
+            | PlayerEvent::PositionChanged { position_ms, .. }
+            | PlayerEvent::PositionCorrection { position_ms, .. } => {
+                timeline.observe_position(position_ms, Some(true));
+            }
+            PlayerEvent::Paused { position_ms, .. } => {
+                timeline.observe_position(position_ms, Some(false));
+            }
+            PlayerEvent::Seeked { position_ms, .. } => {
+                timeline.observe_position(position_ms, None);
+            }
+            PlayerEvent::TrackChanged { audio_item } => {
+                timeline.duration_ms = audio_item.duration_ms;
+            }
+            PlayerEvent::EndOfTrack { .. } => {
+                timeline.position_ms = timeline.duration_ms;
+                timeline.is_playing = false;
+                timeline.end_of_track = true;
+                timeline.observed_at = Some(Instant::now());
+            }
+            PlayerEvent::Stopped { .. } => {
+                timeline.is_playing = false;
+                timeline.observed_at = Some(Instant::now());
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LyricsPayload {
+    language: String,
+    provider: String,
+    sync_type: String,
+    lines: Vec<LyricsLinePayload>,
+    colors: LyricsColorsPayload,
+}
+
+impl From<Lyrics> for LyricsPayload {
+    fn from(lyrics: Lyrics) -> Self {
+        Self {
+            language: lyrics.lyrics.language,
+            provider: lyrics.lyrics.provider_display_name,
+            sync_type: match lyrics.lyrics.sync_type {
+                SyncType::Unsynced => "unsynced".to_owned(),
+                SyncType::LineSynced => "lineSynced".to_owned(),
+            },
+            lines: lyrics
+                .lyrics
+                .lines
+                .into_iter()
+                .map(|line| LyricsLinePayload {
+                    start_time_ms: line.start_time_ms.parse().unwrap_or(0),
+                    end_time_ms: line.end_time_ms.parse().unwrap_or(0),
+                    words: line.words,
+                })
+                .collect(),
+            colors: LyricsColorsPayload {
+                background: lyrics.colors.background,
+                text: lyrics.colors.text,
+                highlight_text: lyrics.colors.highlight_text,
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LyricsLinePayload {
+    start_time_ms: u32,
+    end_time_ms: u32,
+    words: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LyricsColorsPayload {
+    background: i32,
+    text: i32,
+    highlight_text: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SpotifyCore;
+
+    #[test]
+    fn player_commands_require_a_connection() {
+        let core = SpotifyCore::new();
+
+        assert_eq!(core.play().unwrap_err(), "not connected to spotify");
+        assert_eq!(core.pause().unwrap_err(), "not connected to spotify");
+        assert_eq!(core.seek(1_000).unwrap_err(), "not connected to spotify");
+    }
+
+    #[test]
+    fn rejects_invalid_spotify_uris() {
+        let core = SpotifyCore::new();
+
+        assert!(core.load_track("not-a-spotify-uri".to_owned()).is_err());
+    }
+
+    #[tokio::test]
+    async fn awaited_playback_requires_a_connection() {
+        let core = SpotifyCore::new();
+
+        assert_eq!(
+            core.play_track("spotify:track:2WUy2Uywcj5cP0IXQagO3z".to_owned())
+                .await
+                .unwrap_err(),
+            "not connected to spotify"
+        );
+    }
+}
