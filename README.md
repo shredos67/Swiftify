@@ -1,5 +1,5 @@
 # Swiftify
-swiftify is a spotify client written in swift and rust because apps suck.
+swiftify is a spotify client written in swift and rust because electron apps suck.
 
 
 it uses librespot and rust as a backend. the ui is written in swift. this app is very design focused.
