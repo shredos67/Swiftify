@@ -1,0 +1,49 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.38428,0.80371,0.41968,1.00000",
+      "display-p3:0.38452,0.80322,0.41943,1.00000"
+    ]
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "blend-mode" : "lighten",
+          "fill" : {
+            "linear-gradient" : [
+              "display-p3:0.00000,0.00000,0.00000,1.00000",
+              "display-p3:1.00000,1.00000,1.00000,1.00000"
+            ],
+            "orientation" : {
+              "start" : {
+                "x" : 0.5,
+                "y" : 1.767380617977528
+              },
+              "stop" : {
+                "x" : 0.5233201658322904,
+                "y" : 0.04710542485955056
+              }
+            }
+          },
+          "image-name" : "swift.svg",
+          "name" : "swift"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.6
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

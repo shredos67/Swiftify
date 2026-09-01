@@ -15,7 +15,7 @@ the app has full functionality, lyrics, downloads etc. i also added some of my o
 i have taken help from ai to write the swift code since i dont know swift that well and i frankly dont have time to write this app by hand. there are some issues i will fix soon regarding offline downloading and playback sometimes doesnt work due to certain spotify api issues
 
 
-you can download an app bundle for apple silicon via this repos releases. if you arent on apple silicon clone the repo and build an app bundle using xcode.
+you can download an app bundle for apple silicon via this repos releases. building from source currently also requires apple silicon because the rust bridge is compiled for arm64.
 
 
 > [!NOTE]

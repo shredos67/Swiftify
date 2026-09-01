@@ -10,6 +10,7 @@ build/
 *.dSYM
 *.dSYM.zip
 *.ipa
+Icon/export/
 
 xcuserdata/
 *.xcuserstate
