@@ -249,9 +249,10 @@ impl SpotifyCore {
             match event {
                 PlayerEvent::Playing { track_id, .. } if track_id == uri => return Ok(()),
                 PlayerEvent::Unavailable { track_id, .. } if track_id == uri => {
-                    return Err(format!(
-                        "librespot could not load {spotify_uri}; the track itself may still be available"
-                    ));
+                    return Err(
+                        "This song is unavailable on Spotify. It may have been removed or unavailable in your region."
+                            .to_owned(),
+                    );
                 }
                 PlayerEvent::Stopped { track_id, .. } if track_id == uri => {
                     return Err("the Spotify track stopped before playback began".to_owned());

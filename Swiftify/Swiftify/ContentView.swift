@@ -315,7 +315,12 @@ struct ContentView: View {
             }
             .overlay(alignment: .top) {
                 if let errorMessage = player.errorMessage {
-                    ErrorBanner(message: errorMessage)
+                    ErrorBanner(message: errorMessage) {
+                        guard player.errorMessage == errorMessage else {
+                            return
+                        }
+                        player.errorMessage = nil
+                    }
                         .padding(.top, 10)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }

@@ -579,16 +579,37 @@ private func panelHeader(title: String) -> some View {
 
 struct ErrorBanner: View {
     let message: String
+    let dismiss: () -> Void
 
     var body: some View {
-        Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.callout.weight(.medium))
-            .foregroundStyle(.red)
-            .textSelection(.enabled)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .glassEffect(.regular.tint(.red.opacity(0.18)), in: .rect(cornerRadius: 14))
-            .padding(.horizontal, 18)
+        HStack(spacing: 12) {
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.red)
+                .textSelection(.enabled)
+
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                    .contentShape(.circle)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .glassEffect(.regular.tint(.red.opacity(0.18)), in: .rect(cornerRadius: 14))
+        .padding(.horizontal, 18)
+        .task(id: message) {
+            do {
+                try await Task.sleep(for: .seconds(8))
+            } catch {
+                return
+            }
+            dismiss()
+        }
     }
 }
 #endif
