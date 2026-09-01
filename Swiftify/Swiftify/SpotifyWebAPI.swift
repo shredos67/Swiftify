@@ -105,6 +105,17 @@ struct SpotifyWebAPI {
         )
     }
 
+    func song(trackID: String, accessToken: String) async throws -> SpotifySong {
+        let track: Track = try await request(
+            url: spotifyURL(path: "/v1/tracks/\(trackID)"),
+            accessToken: accessToken
+        )
+        guard let song = makeSong(track) else {
+            throw SpotifyWebAPIError.invalidData("Spotify returned an unsupported track.")
+        }
+        return song
+    }
+
     func albumSongs(_ album: SpotifyAlbum, accessToken: String) async throws -> [SpotifySong] {
         var nextURL: URL? = spotifyURL(
             path: "/v1/albums/\(album.id)/tracks",
@@ -118,8 +129,7 @@ struct SpotifyWebAPI {
             songs.append(contentsOf: page.items.compactMap { track in
                 makeSong(
                     track,
-                    fallbackAlbumName: album.name,
-                    fallbackArtworkURL: album.artworkURL
+                    fallbackAlbum: album
                 )
             })
             nextURL = page.next.flatMap(URL.init(string:))
@@ -319,8 +329,7 @@ struct SpotifyWebAPI {
 
     private func makeSong(
         _ track: Track,
-        fallbackAlbumName: String? = nil,
-        fallbackArtworkURL: URL? = nil
+        fallbackAlbum: SpotifyAlbum? = nil
     ) -> SpotifySong? {
         guard
             track.type == nil || track.type == "track",
@@ -329,15 +338,22 @@ struct SpotifyWebAPI {
             return nil
         }
 
+        let trackAlbum = track.album.flatMap(makeAlbum)
+        let album = trackAlbum ?? fallbackAlbum
+        let artists = (track.artists ?? []).compactMap(makeArtist)
+
         return SpotifySong(
             name: track.name,
             artists: (track.artists ?? []).map(\.name).joined(separator: ", "),
-            albumName: track.album?.name ?? fallbackAlbumName,
+            albumName: album?.name,
             artworkURL: preferredArtworkURL(from: track.album?.images, preferredWidth: 640)
-                ?? fallbackArtworkURL,
+                ?? album?.artworkURL,
             uri: track.uri,
             durationMs: track.durationMs,
-            isExplicit: track.explicit ?? false
+            isExplicit: track.explicit ?? false,
+            albumID: album?.id,
+            albumURI: album?.uri,
+            artistItems: artists.isEmpty ? nil : artists
         )
     }
 

@@ -36,6 +36,9 @@ struct SpotifySong: Identifiable, Hashable, Codable, Sendable {
     let uri: String
     let durationMs: Int?
     let isExplicit: Bool
+    let albumID: String?
+    let albumURI: String?
+    let artistItems: [SpotifyArtist]?
 
     init(
         name: String,
@@ -44,7 +47,10 @@ struct SpotifySong: Identifiable, Hashable, Codable, Sendable {
         artworkURL: URL?,
         uri: String,
         durationMs: Int? = nil,
-        isExplicit: Bool = false
+        isExplicit: Bool = false,
+        albumID: String? = nil,
+        albumURI: String? = nil,
+        artistItems: [SpotifyArtist]? = nil
     ) {
         id = UUID()
         self.name = name
@@ -54,10 +60,32 @@ struct SpotifySong: Identifiable, Hashable, Codable, Sendable {
         self.uri = uri
         self.durationMs = durationMs
         self.isExplicit = isExplicit
+        self.albumID = albumID
+        self.albumURI = albumURI
+        self.artistItems = artistItems
     }
 
     var spotifyID: String {
         uri.split(separator: ":").last.map(String.init) ?? uri
+    }
+
+    var albumDestination: SpotifyAlbum? {
+        guard let albumID, let albumName else {
+            return nil
+        }
+        return SpotifyAlbum(
+            id: albumID,
+            name: albumName,
+            artists: artists,
+            artworkURL: artworkURL,
+            releaseDate: nil,
+            songCount: 0,
+            uri: albumURI ?? "spotify:album:\(albumID)"
+        )
+    }
+
+    var primaryArtist: SpotifyArtist? {
+        artistItems?.first
     }
 }
 
@@ -71,7 +99,7 @@ struct SpotifyAlbum: Identifiable, Hashable, Sendable {
     let uri: String
 }
 
-struct SpotifyArtist: Identifiable, Hashable, Sendable {
+struct SpotifyArtist: Identifiable, Hashable, Codable, Sendable {
     let id: String
     let name: String
     let artworkURL: URL?

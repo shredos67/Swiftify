@@ -110,6 +110,7 @@ final class PlayerModel: ObservableObject {
     @Published private(set) var searchPlaybackHistory: [SpotifySong] = []
     @Published private(set) var savedTrackURIs: Set<String> = []
     @Published private(set) var playbackQueue: [SpotifySong] = []
+    @Published private(set) var songNavigationRequest: AppDestination?
     @Published var destination: AppDestination? = .home
     @Published var searchQuery = ""
     @Published var playlistFilterQuery = ""
@@ -1125,6 +1126,73 @@ final class PlayerModel: ObservableObject {
                 logError("Loading \"\(album.name)\"", error)
             }
         }
+    }
+
+    func goToAlbum(for song: SpotifySong) {
+        Task {
+            do {
+                let album: SpotifyAlbum
+                if let knownAlbum = song.albumDestination {
+                    album = knownAlbum
+                } else {
+                    let resolvedSong = try await songWithNavigationMetadata(song)
+                    guard let resolvedAlbum = resolvedSong.albumDestination else {
+                        throw SpotifyWebAPIError.invalidData("Spotify did not return an album for this track.")
+                    }
+                    album = resolvedAlbum
+                }
+                navigateFromSong(to: .album(album))
+            } catch {
+                errorMessage = error.userFacingMessage
+                logError("Opening album for \(song.uri)", error)
+            }
+        }
+    }
+
+    func goToArtist(for song: SpotifySong) {
+        Task {
+            do {
+                let artist: SpotifyArtist
+                if let knownArtist = song.primaryArtist {
+                    artist = knownArtist
+                } else {
+                    let resolvedSong = try await songWithNavigationMetadata(song)
+                    guard let resolvedArtist = resolvedSong.primaryArtist else {
+                        throw SpotifyWebAPIError.invalidData("Spotify did not return an artist for this track.")
+                    }
+                    artist = resolvedArtist
+                }
+                navigateFromSong(to: .artist(artist))
+            } catch {
+                errorMessage = error.userFacingMessage
+                logError("Opening artist for \(song.uri)", error)
+            }
+        }
+    }
+
+    func consumeSongNavigationRequest() {
+        songNavigationRequest = nil
+    }
+
+    private func songWithNavigationMetadata(_ song: SpotifySong) async throws -> SpotifySong {
+        try await withLibraryAccessToken {
+            try await webAPI.song(trackID: song.spotifyID, accessToken: $0)
+        }
+    }
+
+    private func navigateFromSong(to destination: AppDestination) {
+        #if os(iOS)
+        songNavigationRequest = destination
+        #else
+        switch destination {
+        case let .album(album):
+            selectAlbum(album)
+        case let .artist(artist):
+            selectArtist(artist)
+        default:
+            break
+        }
+        #endif
     }
 
     func selectArtist(_ artist: SpotifyArtist) {

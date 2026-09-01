@@ -6,6 +6,8 @@ struct SongOptionsMenu: View {
     var allowsPlaylistRemoval = false
     var labelWidth: CGFloat = 32
     var labelHeight: CGFloat = 40
+    var labelForegroundColor: Color = .primary
+    var onNavigate: (() -> Void)?
 
     var body: some View {
         Menu {
@@ -25,6 +27,22 @@ struct SongOptionsMenu: View {
                     player.removeDownloadedTrack(song)
                 } else {
                     player.downloadTrack(song)
+                }
+            }
+
+            Divider()
+
+            if song.albumName != nil {
+                Button("Go to Album", systemImage: "square.stack") {
+                    onNavigate?()
+                    player.goToAlbum(for: song)
+                }
+            }
+
+            if !song.artists.isEmpty {
+                Button("Go to Artist", systemImage: "person.crop.circle") {
+                    onNavigate?()
+                    player.goToArtist(for: song)
                 }
             }
 
@@ -56,6 +74,7 @@ struct SongOptionsMenu: View {
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(labelForegroundColor)
                 .frame(width: labelWidth, height: labelHeight)
                 .contentShape(.rect)
         }

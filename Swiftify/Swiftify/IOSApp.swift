@@ -34,6 +34,9 @@ private struct IOSRootView: View {
     @State private var selectedTab: IOSTab = .home
     @State private var isShowingNowPlaying = false
     @State private var isShowingCreatePlaylist = false
+    @State private var homePath: [IOSRoute] = []
+    @State private var searchPath: [IOSRoute] = []
+    @State private var libraryPath: [IOSRoute] = []
     @AppStorage(AppPreferences.visualizersEnabledKey) private var visualizersEnabled = true
 
     var body: some View {
@@ -71,6 +74,9 @@ private struct IOSRootView: View {
         }
         .onChange(of: visualizersEnabled, initial: true) { _, isEnabled in
             player.setVisualizersEnabled(isEnabled)
+        }
+        .onChange(of: player.songNavigationRequest) { _, request in
+            handleSongNavigationRequest(request)
         }
     }
 
@@ -110,15 +116,30 @@ private struct IOSRootView: View {
 
     private var tabContent: some View {
         TabView(selection: $selectedTab) {
-            IOSNavigationRoot(player: player, root: .home, createPlaylist: showPlaylistEditor)
+            IOSNavigationRoot(
+                player: player,
+                root: .home,
+                path: $homePath,
+                createPlaylist: showPlaylistEditor
+            )
                 .tabItem { Label("Home", systemImage: "house.fill") }
                 .tag(IOSTab.home)
 
-            IOSNavigationRoot(player: player, root: .search, createPlaylist: showPlaylistEditor)
+            IOSNavigationRoot(
+                player: player,
+                root: .search,
+                path: $searchPath,
+                createPlaylist: showPlaylistEditor
+            )
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
                 .tag(IOSTab.search)
 
-            IOSNavigationRoot(player: player, root: .library, createPlaylist: showPlaylistEditor)
+            IOSNavigationRoot(
+                player: player,
+                root: .library,
+                path: $libraryPath,
+                createPlaylist: showPlaylistEditor
+            )
                 .tabItem { Label("Library", systemImage: "music.note.list") }
                 .tag(IOSTab.library)
 
@@ -131,6 +152,31 @@ private struct IOSRootView: View {
     private func showPlaylistEditor() {
         isShowingCreatePlaylist = true
     }
+
+    private func handleSongNavigationRequest(_ destination: AppDestination?) {
+        guard let destination else {
+            return
+        }
+
+        let route: IOSRoute
+        switch destination {
+        case let .album(album):
+            route = .album(album)
+        case let .artist(artist):
+            route = .artist(artist)
+        default:
+            player.consumeSongNavigationRequest()
+            return
+        }
+
+        isShowingNowPlaying = false
+        selectedTab = .home
+        player.consumeSongNavigationRequest()
+        Task { @MainActor in
+            await Task.yield()
+            homePath.append(route)
+        }
+    }
 }
 
 private enum IOSRootDestination {
@@ -142,10 +188,11 @@ private enum IOSRootDestination {
 private struct IOSNavigationRoot: View {
     @ObservedObject var player: PlayerModel
     let root: IOSRootDestination
+    @Binding var path: [IOSRoute]
     let createPlaylist: () -> Void
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Group {
                 switch root {
                 case .home:
@@ -877,26 +924,31 @@ private struct IOSNowPlayingView: View {
                             radius: 42
                         )
 
-                        ZStack(alignment: .trailing) {
-                            VStack(spacing: 3) {
-                                Text(player.currentSong?.name ?? "Not Playing")
-                                    .font(.title3.bold())
-                                    .multilineTextAlignment(.center)
-                                    .lineLimit(2)
+                        VStack(spacing: 3) {
+                            Text(player.currentSong?.name ?? "Not Playing")
+                                .font(.title3.bold())
+                                .multilineTextAlignment(.center)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(width: artworkSize)
+                                .frame(minHeight: 52, alignment: .center)
+
+                            HStack(spacing: 4) {
                                 Text(player.currentSong?.artists ?? "")
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
-                            }
-                            .frame(maxWidth: .infinity)
 
-                            if let song = player.currentSong {
-                                SongOptionsMenu(
-                                    player: player,
-                                    song: song,
-                                    labelWidth: 44,
-                                    labelHeight: 44
-                                )
+                                if let song = player.currentSong {
+                                    SongOptionsMenu(
+                                        player: player,
+                                        song: song,
+                                        labelWidth: 30,
+                                        labelHeight: 30,
+                                        labelForegroundColor: .secondary,
+                                        onNavigate: { dismiss() }
+                                    )
+                                }
                             }
                         }
 

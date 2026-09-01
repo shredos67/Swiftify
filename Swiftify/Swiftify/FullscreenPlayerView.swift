@@ -30,6 +30,7 @@ struct FullscreenPlayerView: View {
                 : geometry.size.width * 0.38
             let artworkHeight = geometry.size.height * (usesLyricsLayout ? 0.32 : 0.38)
             let artworkSize = max(170, min(min(artworkWidth, artworkHeight), 380))
+            let metadataWidth = max(300, min(400, geometry.size.width * 0.32))
 
             ZStack {
                 if visualizersEnabled {
@@ -55,7 +56,9 @@ struct FullscreenPlayerView: View {
                             FullscreenNowPlaying(
                                 player: player,
                                 song: song,
-                                artworkSize: artworkSize
+                                artworkSize: artworkSize,
+                                metadataWidth: metadataWidth,
+                                onNavigate: close
                             )
                             .frame(maxWidth: usesLyricsLayout ? 500 : 620)
 
@@ -243,6 +246,8 @@ private struct FullscreenNowPlaying: View {
     @ObservedObject var player: PlayerModel
     let song: SpotifySong
     let artworkSize: CGFloat
+    let metadataWidth: CGFloat
+    let onNavigate: () -> Void
     @State private var isShowingArtworkEasterEgg = false
     @State private var artworkEasterEggTask: Task<Void, Never>?
 
@@ -272,36 +277,39 @@ private struct FullscreenNowPlaying: View {
                 radius: 52
             )
 
-            ZStack(alignment: .trailing) {
-                VStack(spacing: 5) {
-                    Text(song.name)
-                        .font(.system(size: 30, weight: .bold, design: .rounded))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 5) {
+                Text(song.name)
+                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: metadataWidth)
+                    .frame(minHeight: 72, alignment: .center)
 
+                HStack(spacing: 5) {
                     Text(song.artists)
                         .font(.title3.weight(.medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
 
-                    if let albumName = song.albumName {
-                        Text(albumName)
-                            .font(.callout)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                    }
+                    SongOptionsMenu(
+                        player: player,
+                        song: song,
+                        labelWidth: 28,
+                        labelHeight: 28,
+                        labelForegroundColor: .secondary,
+                        onNavigate: onNavigate
+                    )
                 }
-                .frame(maxWidth: .infinity)
 
-                SongOptionsMenu(
-                    player: player,
-                    song: song,
-                    labelWidth: 38,
-                    labelHeight: 38
-                )
+                if let albumName = song.albumName {
+                    Text(albumName)
+                        .font(.callout)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
-            .frame(maxWidth: artworkSize)
+            .frame(width: metadataWidth)
             .artworkBackdropGlow(
                 colors: player.spectrum.gradientColors,
                 intensity: 0.2,
