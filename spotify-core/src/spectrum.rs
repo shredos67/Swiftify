@@ -335,8 +335,7 @@ impl SpectrumAnalyzer {
         }
         let frame_energy = ((frame_peak - NOISE_FLOOR_DB) / 55.0).clamp(0.25, 1.0);
 
-        for band in 0..BAND_COUNT {
-            let decibels = band_decibels[band];
+        for (band, &decibels) in band_decibels.iter().enumerate() {
             let relative_energy = ((decibels - frame_peak + 30.0) / 30.0)
                 .clamp(0.0, 1.0)
                 .powf(1.55);

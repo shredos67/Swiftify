@@ -209,6 +209,7 @@ final class PlayerModel: ObservableObject {
 
     init() {
         _ = systemMediaSession
+        configureDownloadsDirectory()
         do {
             try systemMediaSession.configureAudioSession()
         } catch {
@@ -287,6 +288,29 @@ final class PlayerModel: ObservableObject {
             isEvaluatingStoredLogin = false
             errorMessage = error.userFacingMessage
             logError("Reading saved logins", error)
+        }
+    }
+
+    private func configureDownloadsDirectory() {
+        do {
+            let fileManager = FileManager.default
+            var directory = try fileManager.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            .appending(path: "Swiftify", directoryHint: .isDirectory)
+            .appending(path: "Downloads", directoryHint: .isDirectory)
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            var resourceValues = URLResourceValues()
+            resourceValues.isExcludedFromBackup = true
+            try? directory.setResourceValues(resourceValues)
+            try core.set_downloads_directory(directory.path(percentEncoded: false))
+            refreshDownloadedTracks()
+        } catch {
+            errorMessage = "Could not prepare offline downloads: \(error.userFacingMessage)"
+            logError("Preparing offline downloads", error)
         }
     }
 
@@ -508,20 +532,19 @@ final class PlayerModel: ObservableObject {
         }
         isDownloadingPlaylist = true
         Task {
-            defer { 
+            defer {
                 Task { @MainActor in
                     self.isDownloadingPlaylist = false
                     self.refreshDownloadedTracks()
                 }
             }
             do {
-                try await ensureFreshPlaybackConnection()
                 for song in songs where !Task.isCancelled {
                     if core.track_available_locally(song.uri) {
                         continue
                     }
                     do {
-                        try await core.download_track(song.uri)
+                        try await downloadTrackWithRetry(song.uri)
                     } catch {
                         logError("Downloading \(song.uri)", error)
                         throw error
@@ -537,8 +560,7 @@ final class PlayerModel: ObservableObject {
         Task {
             defer { refreshDownloadedTracks() }
             do {
-                try await ensureFreshPlaybackConnection()
-                try await core.download_track(song.uri)
+                try await downloadTrackWithRetry(song.uri)
             } catch {
                 errorMessage = error.userFacingMessage
             }
@@ -722,12 +744,23 @@ final class PlayerModel: ObservableObject {
         }
     }
 
-    private func refreshPlaybackAccessTokenIfNeeded() async throws -> String {
+    private func downloadTrackWithRetry(_ spotifyURI: String) async throws {
+        try await ensureFreshPlaybackConnection()
+        do {
+            try await core.download_track(spotifyURI)
+        } catch {
+            try await ensureFreshPlaybackConnection(force: true)
+            try await core.download_track(spotifyURI)
+        }
+    }
+
+    private func refreshPlaybackAccessTokenIfNeeded(force: Bool = false) async throws -> String {
         if let playbackTokenRefreshTask {
             return try await playbackTokenRefreshTask.value.accessToken
         }
 
-        if let accessToken = playbackAccessToken,
+        if !force,
+           let accessToken = playbackAccessToken,
            let expirationDate = playbackAccessTokenExpirationDate,
            expirationDate > Date().addingTimeInterval(60) {
             return accessToken
@@ -763,9 +796,10 @@ final class PlayerModel: ObservableObject {
     }
 
     private func ensureFreshPlaybackConnection(force: Bool = false) async throws {
-        let accessToken = try await refreshPlaybackAccessTokenIfNeeded()
+        let previousAccessToken = playbackAccessToken
+        let accessToken = try await refreshPlaybackAccessTokenIfNeeded(force: force)
 
-        if force || playbackAccessToken != accessToken || !isConnected {
+        if force || previousAccessToken != accessToken || !isConnected {
             try await connectPlaybackCore(
                 accessToken: accessToken,
                 clientID: playbackClientID
@@ -774,6 +808,7 @@ final class PlayerModel: ObservableObject {
             status = "Connected"
             isConnected = true
             errorMessage = nil
+            refreshDownloadedTracks()
         }
     }
 
@@ -1531,6 +1566,7 @@ final class PlayerModel: ObservableObject {
             status = "Connected"
             isConnected = true
             errorMessage = nil
+            refreshDownloadedTracks()
         } catch {
             status = "Disconnected"
             isConnected = false

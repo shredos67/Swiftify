@@ -6,21 +6,9 @@ struct ArtworkView: View {
     let size: CGFloat
     var cornerRadius: CGFloat = 8
 
-    private var request: URLRequest? {
-        guard let url else {
-            return nil
-        }
-
-        return URLRequest(
-            url: url,
-            cachePolicy: .useProtocolCachePolicy,
-            timeoutInterval: 30
-        )
-    }
-
     var body: some View {
         AsyncImage(
-            request: request,
+            url: url,
             transaction: Transaction(animation: .easeInOut(duration: 0.2))
         ) { phase in
             Group {

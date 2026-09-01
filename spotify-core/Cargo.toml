@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 env_logger = "0.11"
-flacenc = { version = "0.5.1", default-features = false, features = ["log"] }
+hound = "3.5.1"
 librespot = "=0.8.0"
 rustfft = "=6.4.1"
 rodio = { version = "=0.21.1", default-features = false, features = ["playback", "claxon", "wav", "mp3"] }

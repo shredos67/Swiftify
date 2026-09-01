@@ -83,7 +83,32 @@ private struct IOSRootView: View {
         )
     }
 
+    @ViewBuilder
     private var tabs: some View {
+        if #available(iOS 26.1, *) {
+            tabContent
+                .tabViewBottomAccessory(
+                    isEnabled: player.currentSong != nil && !isShowingNowPlaying
+                ) {
+                    IOSMiniPlayer(player: player) {
+                        isShowingNowPlaying = true
+                    }
+                }
+        } else {
+            tabContent
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if player.currentSong != nil && !isShowingNowPlaying {
+                        IOSMiniPlayer(player: player) {
+                            isShowingNowPlaying = true
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.bottom, 4)
+                    }
+                }
+        }
+    }
+
+    private var tabContent: some View {
         TabView(selection: $selectedTab) {
             IOSNavigationRoot(player: player, root: .home, createPlaylist: showPlaylistEditor)
                 .tabItem { Label("Home", systemImage: "house.fill") }
@@ -100,13 +125,6 @@ private struct IOSRootView: View {
             IOSSettingsView(player: player)
                 .tabItem { Label("Settings", systemImage: "gearshape.fill") }
                 .tag(IOSTab.settings)
-        }
-        .tabViewBottomAccessory(
-            isEnabled: player.currentSong != nil && !isShowingNowPlaying
-        ) {
-            IOSMiniPlayer(player: player) {
-                isShowingNowPlaying = true
-            }
         }
     }
 

@@ -251,8 +251,10 @@ final class SystemMediaSession {
                 object: AVAudioSession.sharedInstance(),
                 queue: .main
             ) { [weak self] notification in
+                let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+                let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
                 Task { @MainActor [weak self] in
-                    self?.handleAudioSessionInterruption(notification)
+                    self?.handleAudioSessionInterruption(rawType, options: rawOptions)
                 }
             }
         )
@@ -269,11 +271,9 @@ final class SystemMediaSession {
         )
     }
 
-    private func handleAudioSessionInterruption(_ notification: Notification) {
-        guard
-            let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-            let type = AVAudioSession.InterruptionType(rawValue: rawType)
-        else {
+    private func handleAudioSessionInterruption(_ rawType: UInt?, options rawOptions: UInt?) {
+        guard let rawType,
+              let type = AVAudioSession.InterruptionType(rawValue: rawType) else {
             return
         }
 
@@ -284,8 +284,7 @@ final class SystemMediaSession {
                 handlers.pause()
             }
         case .ended:
-            let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
-            let options = AVAudioSession.InterruptionOptions(rawValue: rawOptions)
+            let options = AVAudioSession.InterruptionOptions(rawValue: rawOptions ?? 0)
             if wasPlayingBeforeInterruption, options.contains(.shouldResume) {
                 try? prepareForPlayback()
                 handlers.play()
