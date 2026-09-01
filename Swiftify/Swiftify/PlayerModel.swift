@@ -45,7 +45,7 @@ final class PlayerModel: ObservableObject {
         }
     }
 
-    let core = SpotifyCore()
+    private var core = SpotifyCore()
     let spectrum = AudioSpectrumModel()
     private let oauthFlow = SpotifyOAuthFlow()
     private let webAPI = SpotifyWebAPI()
@@ -413,6 +413,100 @@ final class PlayerModel: ObservableObject {
             break
         }
         loginPurpose = nil
+    }
+
+    func logOut() {
+        do {
+            try SpotifyCredentialStore.deleteAll()
+        } catch {
+            errorMessage = error.userFacingMessage
+            logError("Deleting saved Spotify logins", error)
+            return
+        }
+
+        cancelLogin()
+        songLoadTask?.cancel()
+        playbackTask?.cancel()
+        lyricsTask?.cancel()
+        searchTask?.cancel()
+        artistLoadTask?.cancel()
+        playbackTokenRefreshTask?.cancel()
+        libraryTokenRefreshTask?.cancel()
+
+        songLoadTask = nil
+        playbackTask = nil
+        lyricsTask = nil
+        searchTask = nil
+        artistLoadTask = nil
+        playbackTokenRefreshTask = nil
+        libraryTokenRefreshTask = nil
+
+        try? core.pause()
+        core = SpotifyCore()
+        errorMessage = nil
+        configureDownloadsDirectory()
+
+        refreshToken = nil
+        playbackAccessToken = nil
+        playbackAccessTokenExpirationDate = nil
+        libraryAccessToken = nil
+        libraryRefreshToken = nil
+        libraryAccessTokenExpirationDate = nil
+        libraryAuthorizationVersion = 0
+        libraryClientID = ""
+
+        status = "Sign in to play"
+        libraryStatus = "Not connected"
+        isConnected = false
+        isLibraryConnected = false
+        libraryNeedsAuthorizationUpgrade = false
+        isEvaluatingStoredLogin = false
+
+        profile = nil
+        playlists = []
+        songs = []
+        savedSongs = []
+        recentlyPlayed = []
+        albumSongs = []
+        artistAlbums = []
+        searchResults = .empty
+        savedTrackURIs = []
+        playbackQueue = []
+        playbackHistory = []
+        shuffledPlaybackQueue = []
+        songNavigationRequest = nil
+        selectedPlaylistID = nil
+        destination = .home
+        searchQuery = ""
+        playlistFilterQuery = ""
+        playlistSortOrder = .playlist
+
+        isLoadingPlaylists = false
+        isLoadingSongs = false
+        isLoadingHome = false
+        isLoadingSavedSongs = false
+        isSearching = false
+        isLoadingArtist = false
+        isCreatingPlaylist = false
+        isDownloadingPlaylist = false
+
+        currentSong = nil
+        isPlaying = false
+        playbackPositionMs = 0
+        playbackDurationMs = 0
+        lastSyncedMediaPosition = .max
+        volume = 0.75
+        volumeBeforeMute = 0.75
+        isShuffleEnabled = false
+        repeatMode = .off
+        lyrics = nil
+        lyricsMessage = nil
+        isLoadingLyrics = false
+        isShowingLyrics = true
+        isShowingQueue = false
+        spectrum.setArtwork(nil)
+        spectrum.clear()
+        systemMediaSession.clear()
     }
 
     func connect(accessToken: String) async {

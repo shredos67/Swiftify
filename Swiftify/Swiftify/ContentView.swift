@@ -150,13 +150,7 @@ struct ContentView: View {
     @AppStorage(AppPreferences.visualizersEnabledKey) private var visualizersEnabled = true
 
     var body: some View {
-        mainContent
-            .overlay {
-                if player.isEvaluatingStoredLogin {
-                    SpotifyStartupLoadingView()
-                        .transition(.opacity)
-                }
-            }
+        rootContent
             .overlay {
             ZStack {
                 if isShowingFullscreenPlayer {
@@ -237,6 +231,16 @@ struct ContentView: View {
         }
         .onDisappear {
             easterEggTask?.cancel()
+        }
+    }
+
+    @ViewBuilder
+    private var rootContent: some View {
+        if player.isEvaluatingStoredLogin {
+            SpotifyStartupLoadingView()
+                .frame(minWidth: 1_100, minHeight: 700)
+        } else {
+            mainContent
         }
     }
 
@@ -935,6 +939,13 @@ private struct MusicSidebar: View {
             Menu {
                 Button("Connect Playback", action: player.beginPlaybackLogin)
                 Button("Reconnect Library", action: player.beginLibraryLogin)
+                Divider()
+                Button(
+                    "Log Out",
+                    systemImage: "rectangle.portrait.and.arrow.right",
+                    role: .destructive,
+                    action: player.logOut
+                )
             } label: {
                 Image(systemName: "ellipsis")
                     .foregroundStyle(.secondary)
@@ -970,9 +981,10 @@ private struct MusicSidebar: View {
 
 struct SpotifySetupView: View {
     @ObservedObject var player: PlayerModel
+    private let dashboardURL = URL(string: "https://developer.spotify.com/dashboard")!
 
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 20) {
             Image(systemName: "music.note.house.fill")
                 .font(.system(size: 56, weight: .medium))
                 .foregroundStyle(MusicStyle.accent)
@@ -980,15 +992,49 @@ struct SpotifySetupView: View {
             Text("Connect Your Music")
                 .font(.largeTitle.bold())
 
-            Text("Search Spotify, manage playlists, save songs, and play through the native librespot engine.")
-                .font(.title3)
+            Text("Swiftify needs a Client ID from your own Spotify developer app. You only have to set this up once.")
+                .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 520)
 
+            VStack(alignment: .leading, spacing: 14) {
+                setupStep(
+                    number: 1,
+                    title: "Create a Spotify app",
+                    detail: "Open the Spotify Developer Dashboard, choose Create app, and select Web API if Spotify asks."
+                )
+
+                Link(destination: dashboardURL) {
+                    Label("Open Spotify Developer Dashboard", systemImage: "arrow.up.right.square")
+                }
+                .padding(.leading, 38)
+
+                setupStep(
+                    number: 2,
+                    title: "Add Swiftify's redirect URI",
+                    detail: "In the app settings, add this exact address under Redirect URIs, then save:"
+                )
+
+                Text(SpotifyOAuthFlow.redirectURI.absoluteString)
+                    .font(.callout.monospaced())
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 8))
+                    .padding(.leading, 38)
+
+                setupStep(
+                    number: 3,
+                    title: "Paste your Client ID",
+                    detail: "Copy the Client ID from the app settings. You do not need the Client Secret."
+                )
+            }
+            .frame(maxWidth: 560, alignment: .leading)
+
             TextField("Spotify Client ID", text: $player.libraryClientID)
                 .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 420)
+                .frame(maxWidth: 460)
                 .onSubmit(player.beginLibraryLogin)
 
             HStack(spacing: 12) {
@@ -1002,12 +1048,11 @@ struct SpotifySetupView: View {
                     .controlSize(.large)
             }
 
-            Text("Redirect URI: http://127.0.0.1:8898/login")
-                .font(.caption.monospaced())
-                .foregroundStyle(.tertiary)
-                .textSelection(.enabled)
+            Text("Connect Library first, then Connect Playback so Swiftify can play music.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
-        .padding(50)
+        .padding(36)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
             RadialGradient(
@@ -1016,6 +1061,25 @@ struct SpotifySetupView: View {
                 startRadius: 10,
                 endRadius: 430
             )
+        }
+    }
+
+    private func setupStep(number: Int, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text("\(number)")
+                .font(.callout.bold())
+                .foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(MusicStyle.accent, in: .circle)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.headline)
+                Text(detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }

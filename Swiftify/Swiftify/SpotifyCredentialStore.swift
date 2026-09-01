@@ -38,6 +38,15 @@ enum SpotifyCredentialStore {
         try save(credentials, account: libraryAccount)
     }
 
+    static func deleteAll() throws {
+        for account in [playbackAccount, libraryAccount] {
+            let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw SpotifyCredentialStoreError(operation: "delete", status: status)
+            }
+        }
+    }
+
     private static func load(account: String) throws -> StoredSpotifyCredentials? {
         var query = baseQuery(account: account)
         query[kSecReturnData as String] = true

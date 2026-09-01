@@ -225,43 +225,79 @@ private struct IOSNavigationRoot: View {
 
 private struct IOSConnectView: View {
     @ObservedObject var player: PlayerModel
+    private let dashboardURL = URL(string: "https://developer.spotify.com/dashboard")!
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 22) {
-                Spacer()
+            ScrollView {
+                VStack(spacing: 20) {
+                    Image(systemName: "waveform.circle.fill")
+                        .font(.system(size: 72))
+                        .foregroundStyle(MusicStyle.accent)
+                        .symbolEffect(.pulse)
 
-                Image(systemName: "waveform.circle.fill")
-                    .font(.system(size: 78))
-                    .foregroundStyle(MusicStyle.accent)
-                    .symbolEffect(.pulse)
+                    Text("Swiftify")
+                        .font(.largeTitle.bold())
 
-                Text("Swiftify")
-                    .font(.largeTitle.bold())
+                    Text("Swiftify needs a Client ID from your own Spotify developer app. You only have to set this up once.")
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
 
-                Text("Connect your Spotify Premium account to search your library and play through the native Apple audio session.")
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 24)
+                    VStack(alignment: .leading, spacing: 14) {
+                        setupStep(
+                            number: 1,
+                            title: "Create a Spotify app",
+                            detail: "Open the Spotify Developer Dashboard, choose Create app, and select Web API if asked."
+                        )
 
-                TextField("Spotify Client ID", text: $player.libraryClientID)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .textFieldStyle(.roundedBorder)
-                    .padding(.horizontal, 28)
+                        Link(destination: dashboardURL) {
+                            Label("Open Spotify Developer Dashboard", systemImage: "arrow.up.right.square")
+                        }
+                        .padding(.leading, 38)
 
-                Button("Connect Library", action: player.beginLibraryLogin)
-                    .buttonStyle(.glassProminent)
-                    .controlSize(.large)
-                    .disabled(player.libraryClientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        setupStep(
+                            number: 2,
+                            title: "Add the redirect URI",
+                            detail: "In the app settings, add this exact address under Redirect URIs, then save:"
+                        )
 
-                Button("Connect Playback", action: player.beginPlaybackLogin)
-                    .buttonStyle(.glass)
-                    .controlSize(.large)
+                        Text(SpotifyOAuthFlow.redirectURI.absoluteString)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .padding(10)
+                            .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 8))
+                            .padding(.leading, 38)
 
-                Spacer()
+                        setupStep(
+                            number: 3,
+                            title: "Paste your Client ID",
+                            detail: "Copy the Client ID from the app settings. You do not need the Client Secret."
+                        )
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    TextField("Spotify Client ID", text: $player.libraryClientID)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textFieldStyle(.roundedBorder)
+
+                    Button("Connect Library", action: player.beginLibraryLogin)
+                        .buttonStyle(.glassProminent)
+                        .controlSize(.large)
+                        .disabled(player.libraryClientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    Button("Connect Playback", action: player.beginPlaybackLogin)
+                        .buttonStyle(.glass)
+                        .controlSize(.large)
+
+                    Text("Connect Library first, then Connect Playback so Swiftify can play music.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 32)
             }
-            .padding()
             .background {
                 RadialGradient(
                     colors: [MusicStyle.accent.opacity(0.22), .clear],
@@ -270,6 +306,24 @@ private struct IOSConnectView: View {
                     endRadius: 520
                 )
                 .ignoresSafeArea()
+            }
+        }
+    }
+
+    private func setupStep(number: Int, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text("\(number)")
+                .font(.callout.bold())
+                .foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(MusicStyle.accent, in: .circle)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.headline)
+                Text(detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -1275,6 +1329,15 @@ private struct IOSSettingsView: View {
                     Toggle("Show audio visualizers", isOn: $visualizersEnabled)
                     Button("Connect Playback", action: player.beginPlaybackLogin)
                     Button("Reconnect Library", action: player.beginLibraryLogin)
+                }
+
+                Section {
+                    Button(
+                        "Log Out",
+                        systemImage: "rectangle.portrait.and.arrow.right",
+                        role: .destructive,
+                        action: player.logOut
+                    )
                 }
 
                 Section("About") {
